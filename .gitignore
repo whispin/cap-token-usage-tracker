@@ -17,3 +17,8 @@ data/
 # Go tooling
 coverage.out
 *.test
+
+# Local workspaces
+.worktrees/
+.superpowers/
+
