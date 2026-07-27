@@ -52,6 +52,9 @@ func TestDecodeUsageSDKJSON(t *testing.T) {
 	if usage.Dimensions.Provider != "anthropic" || usage.Dimensions.FailureStatus != 429 {
 		t.Fatalf("unexpected dimensions: %+v", usage.Dimensions)
 	}
+	if usage.Dimensions.Source != "anthropic" {
+		t.Fatalf("Source = %q, want anthropic", usage.Dimensions.Source)
+	}
 	if usage.Counters.TotalTokens != 30 || usage.LatencyNS != uint64(2*time.Second) || usage.TTFTNS != uint64(250*time.Millisecond) {
 		t.Fatalf("unexpected counters: %+v", usage)
 	}
@@ -169,5 +172,127 @@ func TestNormalizeDimensionCapsLength(t *testing.T) {
 	value := normalizeDimension(strings.Repeat("界", maxDimensionRunes+20))
 	if len([]rune(value)) != maxDimensionRunes {
 		t.Fatalf("dimension length = %d", len([]rune(value)))
+	}
+}
+
+func TestSanitizeSource(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		raw      string
+		want     string
+	}{
+		{
+			name:     "api key becomes provider",
+			provider: "anthropic",
+			raw:      "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345",
+			want:     "anthropic",
+		},
+		{
+			name:     "email becomes provider with summary",
+			provider: "openai",
+			raw:      "user@example.com",
+			want:     "openai · user@example.com",
+		},
+		{
+			name:     "empty source uses provider",
+			provider: "gemini",
+			raw:      "",
+			want:     "gemini",
+		},
+		{
+			name:     "same provider and source no duplicate",
+			provider: "anthropic",
+			raw:      "Anthropic",
+			want:     "anthropic",
+		},
+		{
+			name:     "long high-entropy token discarded",
+			provider: "openai",
+			raw:      "AbCdEfGhIjKlMnOpQrStUvWxYz0123",
+			want:     "openai",
+		},
+		{
+			name:     "secret only yields empty",
+			provider: "",
+			raw:      "sk-proj-abcdefghijklmnopqrstuvwxyz",
+			want:     "",
+		},
+		{
+			name:     "short label kept with provider",
+			provider: "vertex",
+			raw:      "my-project-id",
+			want:     "vertex · my-project-id",
+		},
+		{
+			name:     "provider trimmed",
+			provider: " anthropic ",
+			raw:      "sk-ant-secret-value-long-enough",
+			want:     "anthropic",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeSource(tt.provider, tt.raw)
+			if got != tt.want {
+				t.Fatalf("sanitizeSource(%q, %q) = %q, want %q", tt.provider, tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeUsageSanitizesSecretSource(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	secret := "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345"
+	record := pluginapi.UsageRecord{
+		Provider:    "anthropic",
+		Model:       "claude-opus-4",
+		Source:      secret,
+		APIKey:      "must-not-survive",
+		AuthID:      "secret-auth",
+		RequestedAt: now,
+		Detail:      pluginapi.UsageDetail{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := decodeUsage(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Dimensions.Source != "anthropic" {
+		t.Fatalf("Source = %q, want anthropic", usage.Dimensions.Source)
+	}
+	encoded, err := json.Marshal(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{secret, "must-not-survive", "secret-auth"} {
+		if strings.Contains(string(encoded), leak) {
+			t.Fatalf("sensitive value leaked: %s", leak)
+		}
+	}
+}
+
+func TestDecodeUsageKeepsEmailSourceSummary(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	record := pluginapi.UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4o",
+		Source:      "user@example.com",
+		RequestedAt: now,
+		Detail:      pluginapi.UsageDetail{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := decodeUsage(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Dimensions.Source != "openai · user@example.com" {
+		t.Fatalf("Source = %q, want openai · user@example.com", usage.Dimensions.Source)
 	}
 }

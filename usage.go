@@ -53,13 +53,14 @@ func decodeUsage(raw []byte, now time.Time) (normalizedUsage, error) {
 	}
 
 	failed := firstBool(root, "Failed", "failed")
+	provider := normalizeDimension(firstString(root, "Provider", "provider"))
 	return normalizedUsage{
 		Dimensions: Dimensions{
-			Provider:        normalizeDimension(firstString(root, "Provider", "provider")),
+			Provider:        provider,
 			ExecutorType:    normalizeDimension(firstString(root, "ExecutorType", "executor_type")),
 			Model:           normalizeDimension(firstString(root, "Model", "model")),
 			Alias:           normalizeDimension(firstString(root, "Alias", "alias")),
-			Source:          normalizeDimension(firstString(root, "Source", "source")),
+			Source:          sanitizeSource(provider, firstString(root, "Source", "source")),
 			AuthType:        normalizeDimension(firstString(root, "AuthType", "auth_type")),
 			ServiceTier:     normalizeDimension(firstString(root, "ServiceTier", "service_tier")),
 			ReasoningEffort: normalizeDimension(firstString(root, "ReasoningEffort", "reasoning_effort")),
@@ -180,6 +181,61 @@ func normalizeDimension(value string) string {
 		value = string(runes[:maxDimensionRunes])
 	}
 	return value
+}
+
+func sanitizeSource(provider, raw string) string {
+	provider = strings.TrimSpace(provider)
+	summary := safeSourceSummary(raw)
+	switch {
+	case provider != "" && summary != "" && !strings.EqualFold(provider, summary):
+		return normalizeDimension(provider + " · " + summary)
+	case provider != "":
+		return normalizeDimension(provider)
+	case summary != "":
+		return normalizeDimension(summary)
+	default:
+		return ""
+	}
+}
+
+func safeSourceSummary(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || looksLikeSecretSource(raw) {
+		return ""
+	}
+	return raw
+}
+
+func looksLikeSecretSource(raw string) bool {
+	lower := strings.ToLower(raw)
+	for _, marker := range []string{"sk-", "sk_", "api-key", "apikey", "bearer "} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"sk-", "sk_", "rk-", "key-"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	if strings.Contains(raw, "@") || strings.ContainsAny(raw, " \t\r\n") {
+		return false
+	}
+	if len(raw) < 20 {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func positiveUint(value int64) uint64 {
